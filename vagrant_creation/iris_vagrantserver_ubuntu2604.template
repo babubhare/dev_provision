@@ -44,16 +44,27 @@ Vagrant.configure("2") do |config|
   config.ssh.insert_key = false
 
   # Configure custom SMB shared folder to sync the provision path relatively
-  config.vm.synced_folder "../../shared/provision", "/vagrant", 
+  config.vm.synced_folder "../../shared", "/shared", 
     type: "smb",
     smb_username: "smbuser",
     smb_password: "P@ssw0rd"
 
   # Capture the dynamic system role passed securely from the PowerShell script
   system_role = ENV['VAGRANT_SYSTEM_ROLE'] || "default"
-
-  # Provisioning script using RELATIVE path
+  
+  #Pass BOTH arguments to the provisioning script using an array
   config.vm.provision "shell", 
-    path: "../../shared/provision/script1_bashrc.sh", 
-    args: system_role
+    path: "../../shared/provision/01_script_password.sh", 
+    args: [system_role, "vagrant"]
+	
+  config.vm.provision "shell", 
+    path: "../../shared/provision/02_script_bashrc.sh", 
+    args: [system_role, "root"]
+
+  config.vm.provision "shell", 
+    path: "../../shared/provision/03_script_bashrc_root.sh"
+
+  config.vm.provision "shell", 
+    path: "../../shared/provision/04_script_add_user.sh", 
+    args: ["devuser", "devuser"]	
 end

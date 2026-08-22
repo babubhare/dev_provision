@@ -1,7 +1,14 @@
 #!/bin/bash
 
-# Accept the role as an argument from Vagrant (defaults to 'lpic' if not provided)
-SYSTEM_ROLE="${1:-lpic}"
+# Accept the role and user name as arguments (defaults to 'default' and 'vagrant' if not provided)
+SYSTEM_ROLE="${1:-default}"
+USER_NAME="${2:-vagrant}"
+
+# Determine the home directory for the target user safely
+USER_HOME=$(getent passwd "$USER_NAME" | cut -d: -f6)
+if [ -z "$USER_HOME" ]; then
+    USER_HOME="/home/$USER_NAME"
+fi
 
 # 1. Calculate variables
 kernel_version=$(uname -r)
@@ -15,27 +22,21 @@ temp=$(lsb_release -i)
 count=${#temp}
 bc_codename=$(lsb_release -c | cut -c 11-$count)
 
-# Construct system name dynamically and strip out any unwanted bracket characters or metadata
-raw_systemname="v-${SYSTEM_ROLE}-${bc_distribution_id}${bc_release}${bc_codename}${kernel_version}"
+# Construct system name dynamically using USER_NAME instead of the hardcoded 'v' string
+raw_systemname="${USER_NAME}-${SYSTEM_ROLE}-${bc_distribution_id}${bc_release}${bc_codename}${kernel_version}"
 bc_systemname=$(echo "$raw_systemname" | sed 's/\[.*//g' | tr -cd '[:alnum:]._-')
 
 # Apply the system hostname cleanly
 sudo hostnamectl set-hostname "${bc_systemname}"
-# Apply the system hostname
-sudo hostnamectl set-hostname "${bc_systemname}"
-
-# Export system name to shared directory for host reading
-echo "${bc_systemname}" > /vagrant/system_name.txt
 
 # 2. Remove existing BABU CHANGES block from .bashrc if it exists
-if grep -q "# BABU CHANGES" /home/vagrant/.bashrc; then
+if [ -f "${USER_HOME}/.bashrc" ] && grep -q "# BABU CHANGES" "${USER_HOME}/.bashrc"; then
     # Use sed to delete lines starting from '# BABU CHANGES' up to '# END CHANGES' (inclusive)
-    sed -i '/# BABU CHANGES/,/# END CHANGES/d' /home/vagrant/.bashrc
-    # Also clean up any lingering trailing PS1 block associated with it if needed, or let the block handle it below
+    sed -i '/# BABU CHANGES/,/# END CHANGES/d' "${USER_HOME}/.bashrc"
 fi
 
 # 3. Append the fresh code block to .bashrc
-cat << EOF >> /home/vagrant/.bashrc
+cat << EOF >> "${USER_HOME}/.bashrc"
 
 # BABU CHANGES
 kernel_version=\$(uname -r)
@@ -49,9 +50,9 @@ temp=\$(lsb_release -i)
 count=\${#temp}
 bc_codename=\$(lsb_release -c | cut -c 11-\$count)
 
-# Construct system name dynamically and strip out any unwanted bracket characters or metadata
-raw_systemname="v-${SYSTEM_ROLE}-${bc_distribution_id}${bc_release}${bc_codename}${kernel_version}"
-bc_systemname=$(echo "$raw_systemname" | sed 's/\[.*//g' | tr -cd '[:alnum:]._-')
+# Construct system name dynamically using USER_NAME instead of the hardcoded 'v' string
+raw_systemname="${USER_NAME}-${SYSTEM_ROLE}-\${bc_distribution_id}\${bc_release}\${bc_codename}\${kernel_version}"
+bc_systemname=\$(echo "\$raw_systemname" | sed 's/\[.*//g' | tr -cd '[:alnum:]._-')
 
 # END CHANGES
 
@@ -62,6 +63,5 @@ else
 fi
 EOF
 
-# Ensure proper ownership
-chown vagrant:vagrant /home/vagrant/.bashrc
-chown vagrant:vagrant /vagrant/system_name.txt 2>/dev/null || true
+# Ensure proper ownership applied dynamically based on the passed username
+chown ${USER_NAME}:${USER_NAME} "${USER_HOME}/.bashrc"

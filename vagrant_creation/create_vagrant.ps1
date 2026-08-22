@@ -20,16 +20,13 @@ while ($selection -lt 0 -or $selection -ge $templates.Count) {
 }
 $selectedTemplate = $templates[$selection]
 
-# 4. Prompt user for system role and aggressively strip out any appended bracket metadata
+# 4. Prompt user for system role and sanitize input
 $rawSystemRole = Read-Host "Enter the system role (Press Enter for default 'default')"
 if ([string]::IsNullOrWhiteSpace($rawSystemRole)) {
     $systemRole = "default"
 } else {
-    # Remove everything from the opening bracket onwards if interface artifacts get attached
     $cleanInput = $rawSystemRole.Split("[")[0].Trim()
-    # Keep only safe alphanumeric characters, dashes, and underscores
     $systemRole = ($cleanInput -replace '[^a-zA-Z0-9\-_]', '')
-    
     if ([string]::IsNullOrWhiteSpace($systemRole)) {
         $systemRole = "default"
     }
@@ -43,13 +40,14 @@ if (!(Test-Path $parentVagrantDir)) {
     New-Item -ItemType Directory -Path $parentVagrantDir -Force | Out-Null
 }
 
+# 6. Pass the sanitized role to Vagrant via Environment Variable
+$env:VAGRANT_SYSTEM_ROLE = $systemRole
+
+# Create a temporary working folder name to boot up and capture hostname
 $tempFolderName = "temp_deploy_$([guid]::NewGuid().ToString().Substring(0,8))"
 $tempFolderPath = Join-Path $parentVagrantDir $tempFolderName
 $tempFolder = New-Item -ItemType Directory -Path $tempFolderPath -Force
 Copy-Item -Path $selectedTemplate.FullName -Destination "$tempFolder\Vagrantfile"
-
-# 6. Pass the sanitized role to Vagrant via Environment Variable
-$env:VAGRANT_SYSTEM_ROLE = $systemRole
 
 Push-Location -Path $tempFolder
 $hostName = ""
@@ -72,25 +70,14 @@ try {
         if (Test-Path $vagrantIdPath) {
             $vmId = (Get-Content $vagrantIdPath).Trim()
             
-            # 8. Halt the VM and wait for Hyper-V handles to release
+            # 8. Halt the VM completely so Hyper-V releases file handles
             Write-Host "Halting VM and waiting for Hyper-V to release handles..." -ForegroundColor Yellow
             vagrant halt
-            Start-Sleep -Seconds 8
+            Start-Sleep -Seconds 10
             
-            # 9. Rename the Hyper-V VM
-            Write-Host "Renaming Hyper-V VM to $hostName..."
-            Get-VM -Id $vmId | Rename-VM -NewName $hostName
-
-            # 10. Clean up temporary SMB share
-            Write-Host "Cleaning up temporary SMB shares..."
-            Get-SmbShare | Where-Object Path -eq $tempFolder.FullName | Remove-SmbShare -Force -Confirm:$false
-            
-            # 11. Update the Vagrantfile v.vmname
-            Write-Host "Updating Vagrantfile v.vmname to $hostName..."
-            $vFile = ".\Vagrantfile"
-            if (Test-Path $vFile) {
-                (Get-Content $vFile) -replace 'v\.vmname\s*=\s*".*"', "v.vmname = `"$hostName`"" | Set-Content $vFile
-            }
+            # 9. Unregister the VM from Hyper-V temporarily so we can move its files safely without security locks
+            Write-Host "Unregistering VM from Hyper-V to safely relocate files..."
+            Unregister-VM -Id $vmId -Confirm:$false
         }
     }
 } finally {
@@ -104,42 +91,48 @@ try {
             Remove-Item -Path $finalFolderPath -Recurse -Force
         }
 
-        # 12. Robust Move using Robocopy to bypass Hyper-V file locks safely
+        # 10. Move deployment contents cleanly to final destination folder named after the hostname
         Write-Host "Moving deployment contents to final folder: $hostName..."
-        if (!(Test-Path $finalFolderPath)) {
-            New-Item -ItemType Directory -Path $finalFolderPath -Force | Out-Null
-        }
-
+        New-Item -ItemType Directory -Path $finalFolderPath -Force | Out-Null
+        
         robocopy "$($tempFolder.FullName)" "$finalFolderPath" /E /MOVE /NFL /NDL /NJH /NJS | Out-Null
-
-        # Give Windows a moment to release handles before attempting to remove the empty temp root
         Start-Sleep -Seconds 3
-        
-        $cleanupSuccess = $false
-        $cleanupRetries = 0
-        while (-not $cleanupSuccess -and $cleanupRetries -lt 5) {
-            try {
-                Remove-Item -Path $tempFolder.FullName -Recurse -Force -ErrorAction Stop
-                $cleanupSuccess = $true
-            } catch {
-                $cleanupRetries++
-                Start-Sleep -Seconds 3
-            }
-        }
+        Remove-Item -Path $tempFolder.FullName -Recurse -Force -ErrorAction SilentlyContinue
 
-        # 13. Fix Vagrant's Global Index tracking path
-        Write-Host "Updating Vagrant Global Machine Index..."
-        $vagrantIndex = "$env:USERPROFILE\.vagrant.d\data\machine-index\index"
-        
-        if (Test-Path $vagrantIndex) {
-            $json = Get-Content $vagrantIndex -Raw | ConvertFrom-Json
-            if ($null -ne $vmId -and $null -ne $json.machines.$vmId) {
-                $newVagrantPath = "$(Join-Path $parentVagrantDir $hostName)\.vagrant"
-                $json.machines.$vmId.local_data_path = $newVagrantPath
-                $json | ConvertTo-Json -Depth 20 | Set-Content -Path $vagrantIndex
+        # 11. Re-register the VM under Hyper-V from its new permanent home path
+        $newVmxFile = Get-ChildItem -Path $finalFolderPath -Filter "*.vmcx" -Recurse | Select-Object -First 1
+        if ($newVmxFile) {
+            Write-Host "Registering VM under Hyper-V from final location..."
+            $registeredVM = Register-VM -Path $newVmxFile.FullName -Passthru
+            
+            if ($registeredVM) {
+                # Rename Hyper-V VM to match hostname
+                Rename-VM -VM $registeredVM -NewName $hostName -ErrorAction SilentlyContinue
+
+                # 12. Update the Vagrantfile v.vmname and config.ssh.username
+                Write-Host "Updating Vagrantfile configurations..."
+                $vFile = Join-Path $finalFolderPath "Vagrantfile"
+                if (Test-Path $vFile) {
+                    $vContents = Get-Content $vFile
+                    $vContents = $vContents -replace 'v\.vmname\s*=\s*".*"', "v.vmname = `"$hostName`""
+                    $vContents = $vContents -replace 'config\.ssh\.username\s*=\s*".*"', 'config.ssh.username = "devuser"'
+                    $vContents | Set-Content $vFile
+                }
+
+                # 13. Fix Vagrant's Global Index tracking path to point to the final folder
+                Write-Host "Updating Vagrant Global Machine Index..."
+                $vagrantIndex = "$env:USERPROFILE\.vagrant.d\data\machine-index\index"
+                if (Test-Path $vagrantIndex) {
+                    $json = Get-Content $vagrantIndex -Raw | ConvertFrom-Json
+                    $targetId = $registeredVM.Id.Guid
+                    if ($null -ne $json.machines.$targetId) {
+                        $json.machines.$targetId.local_data_path = "$(Join-Path $finalFolderPath ".vagrant")"
+                        $json | ConvertTo-Json -Depth 20 | Set-Content -Path $vagrantIndex
+                    }
+                }
             }
         }
     }
     
-    Write-Host "Deployment and reconfiguration finished successfully!" -ForegroundColor Green
+    Write-Host "Deployment, relocation, and reconfiguration finished successfully!" -ForegroundColor Green
 }
