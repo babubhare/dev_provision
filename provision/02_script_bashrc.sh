@@ -51,7 +51,7 @@ count=\${#temp}
 bc_codename=\$(lsb_release -c | cut -c 11-\$count)
 
 # Construct system name dynamically using USER_NAME instead of the hardcoded 'v' string
-raw_systemname="$v-${SYSTEM_ROLE}-\${bc_distribution_id}\${bc_release}\${bc_codename}\${kernel_version}"
+raw_systemname="v-${SYSTEM_ROLE}-\${bc_distribution_id}\${bc_release}\${bc_codename}\${kernel_version}"
 bc_systemname=\$(echo "\$raw_systemname" | sed 's/\[.*//g' | tr -cd '[:alnum:]._-')
 
 # END CHANGES
@@ -64,4 +64,8 @@ fi
 EOF
 
 # Ensure proper ownership applied dynamically based on the passed username
-chown ${USER_NAME}:${USER_NAME} "${USER_HOME}/.bashrc"
+if [ "$USER_NAME" = "root" ]; then
+    chown root:root "${USER_HOME}/.bashrc"
+else
+    chown ${USER_NAME}:${USER_NAME} "${USER_HOME}/.bashrc"
+fi

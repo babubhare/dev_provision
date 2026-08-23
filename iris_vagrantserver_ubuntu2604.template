@@ -56,17 +56,34 @@ Vagrant.configure("2") do |config|
   
   # Reference provisioning scripts directly from the master root provision folder
   config.vm.provision "shell", 
-    path: "../../provision/01_script_password.sh", 
+    path: "../../provision/01_script_password.sh"
+
+   config.vm.provision "shell", 
+    path: "../../provision/02_script_bashrc.sh", 
     args: [system_role, "vagrant"]
-    
+
+  config.vm.provision "shell", 
+    path: "../../provision/03_script_ssh.sh",
+    args: ["vagrant"]
+
   config.vm.provision "shell", 
     path: "../../provision/02_script_bashrc.sh", 
     args: [system_role, "root"]
 
   config.vm.provision "shell", 
-    path: "../../provision/03_script_bashrc_root.sh"
+    path: "../../provision/03_script_ssh.sh",
+    args: ["root"]
 
   config.vm.provision "shell", 
     path: "../../provision/04_script_add_user.sh", 
     args: ["devuser", "devuser"]    
+
+  config.vm.provision "shell", 
+    path: "../../provision/02_script_bashrc.sh", 
+    args: [system_role, "devuser"]    
+
+  config.vm.provision "shell", 
+    path: "../../provision/03_script_ssh.sh",
+    args: ["devuser"]
+
 end

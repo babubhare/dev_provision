@@ -127,6 +127,15 @@ if (!([string]::IsNullOrWhiteSpace($hostName))) {
         $vContents | Set-Content $finalVFile
     }
 
+    # Copy start_vagrant.ps1 from root to the new VM folder
+    $sourceStartScript = Join-Path $PSScriptRoot "start_vagrant.ps1"
+    if (Test-Path $sourceStartScript) {
+        Write-Host "Copying start_vagrant.ps1 to the VM folder..." -ForegroundColor Cyan
+        Copy-Item -Path $sourceStartScript -Destination (Join-Path $finalFolderPath "start_vagrant.ps1") -Force
+    } else {
+        Write-Warning "Could not find start_vagrant.ps1 in '$PSScriptRoot'. Make sure it exists so it can be copied."
+    }
+
     # 11. Run vagrant up with provision in the permanent folder
     Write-Host "Starting and provisioning VM in its permanent folder location..." -ForegroundColor Cyan
     Push-Location -Path $finalFolderPath
@@ -147,13 +156,15 @@ if (!([string]::IsNullOrWhiteSpace($hostName))) {
 
     Write-Host "Deployment, provisioning, and final configuration completed successfully!" -ForegroundColor Green
 
-    # 14. Prompt user to open a separate terminal window/tab
-    $openTerminal = Read-Host "Would you like to open a new terminal window/tab for the newly created VM folder? (y/n)"
+    # 14. Prompt user to open a separate terminal window/tab and automatically run vagrant ssh
+    $openTerminal = Read-Host "Would you like to open a new terminal window/tab and connect to the VM via SSH? (y/n)"
     if ($openTerminal -match '^[Yy]') {
         if (Get-Command "wt.exe" -ErrorAction SilentlyContinue) {
-            Start-Process wt.exe -ArgumentList "new-tab -d `"$finalFolderPath`""
+            # Windows Terminal: open tab at folder path and execute vagrant ssh
+            Start-Process wt.exe -ArgumentList "new-tab -d `"$finalFolderPath`" ; powershell -NoExit -Command `"vagrant ssh`""
         } else {
-            Start-Process powershell.exe -ArgumentList "-NoExit -Command `"Set-Location '$finalFolderPath'`""
+            # Standard PowerShell: open window, set path, and run vagrant ssh
+            Start-Process powershell.exe -ArgumentList "-NoExit -Command `"Set-Location '$finalFolderPath'; vagrant ssh`""
         }
     }
 }
