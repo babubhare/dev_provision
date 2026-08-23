@@ -156,14 +156,14 @@ if (!([string]::IsNullOrWhiteSpace($hostName))) {
 
     Write-Host "Deployment, provisioning, and final configuration completed successfully!" -ForegroundColor Green
 
-    # 14. Prompt user to open a separate terminal window/tab and automatically run vagrant ssh
-    $openTerminal = Read-Host "Would you like to open a new terminal window/tab and connect to the VM via SSH? (y/n)"
+    # 14. Automatically open a completely new Windows Terminal window in the target folder and run vagrant ssh
+    $openTerminal = Read-Host "Would you like to open a new terminal window and connect to the VM via SSH? (y/n)"
     if ($openTerminal -match '^[Yy]') {
         if (Get-Command "wt.exe" -ErrorAction SilentlyContinue) {
-            # Windows Terminal: open tab at folder path and execute vagrant ssh
-            Start-Process wt.exe -ArgumentList "new-tab -d `"$finalFolderPath`" ; powershell -NoExit -Command `"vagrant ssh`""
+            # Opens a brand-new Windows Terminal window (-w -1) starting in the VM folder and running vagrant ssh
+            Start-Process wt.exe -ArgumentList "-w -1 nt -d `"$finalFolderPath`" powershell -NoExit -Command `"vagrant ssh`""
         } else {
-            # Standard PowerShell: open window, set path, and run vagrant ssh
+            # Fallback to standard PowerShell window if Windows Terminal is missing
             Start-Process powershell.exe -ArgumentList "-NoExit -Command `"Set-Location '$finalFolderPath'; vagrant ssh`""
         }
     }
