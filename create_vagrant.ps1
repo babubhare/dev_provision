@@ -34,7 +34,7 @@ if ([string]::IsNullOrWhiteSpace($rawSystemRole)) {
 
 Write-Host "Using System Role: $systemRole" -ForegroundColor Green
 
-# 5. Define 'vagrant' directory as a direct subfolder where Deploy-VM.ps1 resides
+# 5. Define 'vagrant' directory as a direct subfolder where create_vagrant.ps1 resides
 $parentVagrantDir = "$PSScriptRoot\vagrant"
 if (!(Test-Path $parentVagrantDir)) {
     New-Item -ItemType Directory -Path $parentVagrantDir -Force | Out-Null
@@ -47,18 +47,19 @@ $tempFolderName = "temp_deploy_$([guid]::NewGuid().ToString().Substring(0,8))"
 $tempFolderPath = Join-Path $parentVagrantDir $tempFolderName
 $tempFolder = New-Item -ItemType Directory -Path $tempFolderPath -Force
 
-# Copy ONLY the Vagrantfile template
+# Copy ONLY the Vagrantfile template to temp folder
 Copy-Item -Path $selectedTemplate.FullName -Destination "$tempFolder\Vagrantfile"
 
 Push-Location -Path $tempFolder
 $hostName = ""
-$finalFolderPath = ""
+$vmId = $null
 
 try {
+    # 7. Run vagrant up with provision in the temp folder
     vagrant up --provision
 
-    # 7. Retrieve the generated hostname via SSH command with a brief retry buffer
-    Write-Host "Retrieving system hostname from the VM..." -ForegroundColor Cyan
+    # 8. Get the hostname via SSH *after* system is fully provisioned
+    Write-Host "Retrieving system hostname from the provisioned VM..." -ForegroundColor Cyan
     Start-Sleep -Seconds 3
     $rawHostName = vagrant ssh -c "hostname" 2>$null
     
@@ -71,93 +72,88 @@ try {
         $hostName = $selectedTemplate.BaseName
     } else {
         Write-Host "Captured Hostname: $hostName" -ForegroundColor Cyan
+    }
 
-        $vagrantIdPath = ".\.vagrant\machines\default\hyperv\id"
-        if (Test-Path $vagrantIdPath) {
-            $vmId = (Get-Content $vagrantIdPath).Trim()
-            
-            # 8. Halt the VM and wait for handles to release
-            Write-Host "Halting VM and waiting for Hyper-V to release handles..." -ForegroundColor Yellow
-            vagrant halt
-            Start-Sleep -Seconds 8
-            
-            # 9. Safely remove the virtual machine from Hyper-V management using its ID
-            Write-Host "Removing temporary Hyper-V VM tracking..."
-            Get-VM -Id $vmId -ErrorAction SilentlyContinue | Remove-VM -Force -Confirm:$false
-
-            # 10. Clean up temporary SMB share
-            Write-Host "Cleaning up temporary SMB shares..."
-            Get-SmbShare | Where-Object Path -eq $tempFolder.FullName | Remove-SmbShare -Force -Confirm:$false
-        }
+    # Grab Hyper-V ID for cleanup tracking
+    $vagrantIdPath = ".\.vagrant\machines\default\hyperv\id"
+    if (Test-Path $vagrantIdPath) {
+        $vmId = (Get-Content $vagrantIdPath).Trim()
     }
 } finally {
     Pop-Location
+}
 
-    if ($hostName -ne $tempFolderName -and !([string]::IsNullOrWhiteSpace($hostName))) {
-        $finalFolderPath = Join-Path $parentVagrantDir $hostName
-        
-        if (Test-Path $finalFolderPath) {
-            Write-Host "Target folder $finalFolderPath already exists. Removing old folder..." -ForegroundColor Yellow
-            Remove-Item -Path $finalFolderPath -Recurse -Force
-        }
+if (!([string]::IsNullOrWhiteSpace($hostName))) {
+    $finalFolderPath = Join-Path $parentVagrantDir $hostName
 
-        # 11. Move deployment contents to final folder named after the captured hostname
-        Write-Host "Moving deployment contents to final folder: $hostName..."
-        New-Item -ItemType Directory -Path $finalFolderPath -Force | Out-Null
-        
-        robocopy "$($tempFolder.FullName)" "$finalFolderPath" /E /MOVE /NFL /NDL /NJH /NJS | Out-Null
-        Start-Sleep -Seconds 3
-        Remove-Item -Path $tempFolder.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    # 9. Delete/Destroy the temp VM and the temp folder
+    Write-Host "Cleaning up temporary VM instance and folder..." -ForegroundColor Yellow
+    Push-Location -Path $tempFolderPath
+    vagrant destroy -f
+    Pop-Location
+    Start-Sleep -Seconds 3
 
-        # 12. Update vmname configuration in the final Vagrantfile
-        $finalVFile = Join-Path $finalFolderPath "Vagrantfile"
-        if (Test-Path $finalVFile) {
-            Write-Host "Updating final Vagrantfile configurations..."
-            $vContents = Get-Content $finalVFile
-            $vContents = $vContents -replace 'v\.vmname\s*=\s*".*"', "v.vmname = `"$hostName`""
-            $vContents | Set-Content $finalVFile
-        }
-
-        # 13. Clean up the old entry from Vagrant global machine index safely
-        Write-Host "Clearing old machine tracking from Vagrant Index..."
-        $vagrantIndex = "$env:USERPROFILE\.vagrant.d\data\machine-index\index"
-        
-        if (-not [string]::IsNullOrEmpty($vagrantIndex)) {
-            if (Test-Path $vagrantIndex) {
-                if ($null -ne $vmId) {
-                    $json = Get-Content $vagrantIndex -Raw | ConvertFrom-Json
-                    if ($null -ne $json.machines.$vmId) {
-                        $json.machines.PSObject.Properties.Remove($vmId)
-                        $json | ConvertTo-Json -Depth 20 | Set-Content -Path $vagrantIndex
-                    }
-                }
-            }
-        }
-
-        # 14. Automatically boot up the VM in its final folder location
-        Write-Host "Starting VM in its final destination folder..." -ForegroundColor Cyan
-        Push-Location -Path $finalFolderPath
-        vagrant up
-        Pop-Location
+    if ($null -ne $vmId) {
+        Get-VM -Id $vmId -ErrorAction SilentlyContinue | Remove-VM -Force -Confirm:$false
     }
-    
-    Write-Host "Deployment, relocation, and startup finished successfully!" -ForegroundColor Green
+    Get-SmbShare | Where-Object Path -eq $tempFolder.FullName | Remove-SmbShare -Force -Confirm:$false
+    Remove-Item -Path $tempFolder.FullName -Recurse -Force -ErrorAction SilentlyContinue
 
-    # 15. Prompt user to open terminal and folder
-    if (-not [string]::IsNullOrEmpty($finalFolderPath) -and (Test-Path $finalFolderPath)) {
-        $openTerminal = Read-Host "Would you like to open a new terminal window/tab for the newly created VM folder? (y/n)"
-        if ($openTerminal -match '^[Yy]') {
-            # Check if Windows Terminal (wt.exe) is available to open a new tab, otherwise fallback to standard PowerShell window
-            if (Get-Command "wt.exe" -ErrorAction SilentlyContinue) {
-                Start-Process wt.exe -ArgumentList "new-tab -d `"$finalFolderPath`""
-            } else {
-                Start-Process powershell.exe -ArgumentList "-NoExit -Command `"Set-Location '$finalFolderPath'`""
-            }
+    # Clean up global Vagrant machine index for the temp VM ID
+    $vagrantIndex = "$env:USERPROFILE\.vagrant.d\data\machine-index\index"
+    if (Test-Path $vagrantIndex) {
+        $json = Get-Content $vagrantIndex -Raw | ConvertFrom-Json
+        if ($null -ne $vmId -and $null -ne $json.machines.$vmId) {
+            $json.machines.PSObject.Properties.Remove($vmId)
+            $json | ConvertTo-Json -Depth 20 | Set-Content -Path $vagrantIndex
         }
+    }
 
-        $openFolder = Read-Host "Would you like to open the newly created VM folder in Explorer? (y/n)"
-        if ($openFolder -match '^[Yy]') {
-            Start-Process explorer.exe $finalFolderPath
+    # 10. Create new permanent folder with the exact hostname
+    if (Test-Path $finalFolderPath) {
+        Remove-Item -Path $finalFolderPath -Recurse -Force
+    }
+    Write-Host "Creating permanent folder: $hostName..." -ForegroundColor Cyan
+    New-Item -ItemType Directory -Path $finalFolderPath -Force | Out-Null
+
+    # Copy template into the new permanent folder
+    Copy-Item -Path $selectedTemplate.FullName -Destination "$finalFolderPath\Vagrantfile"
+
+    # Update vmname configuration inside the final Vagrantfile
+    $finalVFile = Join-Path $finalFolderPath "Vagrantfile"
+    if (Test-Path $finalVFile) {
+        $vContents = Get-Content $finalVFile
+        $vContents = $vContents -replace 'v\.vmname\s*=\s*".*"', "v.vmname = `"$hostName`""
+        $vContents | Set-Content $finalVFile
+    }
+
+    # 11. Run vagrant up with provision in the permanent folder
+    Write-Host "Starting and provisioning VM in its permanent folder location..." -ForegroundColor Cyan
+    Push-Location -Path $finalFolderPath
+    vagrant up --provision
+
+    # 12. Change username config to devuser in the Vagrantfile
+    Write-Host "Updating Vagrantfile SSH username to 'devuser'..." -ForegroundColor Cyan
+    if (Test-Path $finalVFile) {
+        $vContents = Get-Content $finalVFile
+        $vContents = $vContents -replace 'config\.ssh\.username\s*=\s*"vagrant"', 'config.ssh.username = "devuser"'
+        $vContents | Set-Content $finalVFile
+    }
+
+    # 13. Run vagrant reload to apply username configuration update safely
+    Write-Host "Reloading VM to apply username changes..." -ForegroundColor Cyan
+    vagrant reload
+    Pop-Location
+
+    Write-Host "Deployment, provisioning, and final configuration completed successfully!" -ForegroundColor Green
+
+    # 14. Prompt user to open a separate terminal window/tab
+    $openTerminal = Read-Host "Would you like to open a new terminal window/tab for the newly created VM folder? (y/n)"
+    if ($openTerminal -match '^[Yy]') {
+        if (Get-Command "wt.exe" -ErrorAction SilentlyContinue) {
+            Start-Process wt.exe -ArgumentList "new-tab -d `"$finalFolderPath`""
+        } else {
+            Start-Process powershell.exe -ArgumentList "-NoExit -Command `"Set-Location '$finalFolderPath'`""
         }
     }
 }

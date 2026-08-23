@@ -23,7 +23,7 @@ count=${#temp}
 bc_codename=$(lsb_release -c | cut -c 11-$count)
 
 # Construct system name dynamically using USER_NAME instead of the hardcoded 'v' string
-raw_systemname="${USER_NAME}-${SYSTEM_ROLE}-${bc_distribution_id}${bc_release}${bc_codename}${kernel_version}"
+raw_systemname="v-${SYSTEM_ROLE}-${bc_distribution_id}${bc_release}${bc_codename}${kernel_version}"
 bc_systemname=$(echo "$raw_systemname" | sed 's/\[.*//g' | tr -cd '[:alnum:]._-')
 
 # Apply the system hostname cleanly
@@ -51,7 +51,7 @@ count=\${#temp}
 bc_codename=\$(lsb_release -c | cut -c 11-\$count)
 
 # Construct system name dynamically using USER_NAME instead of the hardcoded 'v' string
-raw_systemname="${USER_NAME}-${SYSTEM_ROLE}-\${bc_distribution_id}\${bc_release}\${bc_codename}\${kernel_version}"
+raw_systemname="$v-${SYSTEM_ROLE}-\${bc_distribution_id}\${bc_release}\${bc_codename}\${kernel_version}"
 bc_systemname=\$(echo "\$raw_systemname" | sed 's/\[.*//g' | tr -cd '[:alnum:]._-')
 
 # END CHANGES

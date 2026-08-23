@@ -49,6 +49,8 @@ Vagrant.configure("2") do |config|
     smb_username: "smbuser",
     smb_password: "P@ssw0rd"
 
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+  
   # Capture the dynamic system role passed securely from the PowerShell script
   system_role = ENV['VAGRANT_SYSTEM_ROLE'] || "default"
   
