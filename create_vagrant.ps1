@@ -152,18 +152,66 @@ if (!([string]::IsNullOrWhiteSpace($hostName))) {
     # 13. Run vagrant reload to apply username configuration update safely
     Write-Host "Reloading VM to apply username changes..." -ForegroundColor Cyan
     vagrant reload
+
+    # --- 14. EXTRACT IP & UPDATE WINDOWS SSH CONFIG (NON-DUPLICATING) ---
+    Write-Host "Extracting connection details and updating Windows SSH config..." -ForegroundColor Cyan
+    $sshConfigOutput = vagrant ssh-config
+    $vmIp = $null
+    foreach ($line in $sshConfigOutput) {
+        if ($line -match '^\s*HostName\s+(.*)$') {
+            $vmIp = $Matches[1].Trim()
+            break
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($vmIp)) {
+        $sshDir = "$env:USERPROFILE\.ssh"
+        if (!(Test-Path $sshDir)) {
+            New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
+        }
+        $sshConfigFile = Join-Path $sshDir "config"
+
+        $identityFileDefault = "$env:USERPROFILE\.vagrant.d\insecure_private_keys\vagrant.key.rsa"
+        
+        $newHostBlock = @"
+
+Host $hostName
+    HostName $vmIp
+    User devuser
+    IdentityFile "$identityFileDefault"
+"@
+
+        if (Test-Path $sshConfigFile) {
+            $configContent = Get-Content $sshConfigFile -Raw
+            # Pattern to match an existing Host block for this specific name up to the next Host header or end of file
+            $pattern = "(?ms)Host\s+$hostName\r?\n.*?(?=\r?\nHost\s+|\Z)"
+            
+            if ($configContent -match $pattern) {
+                # Modify/Replace the existing block cleanly in-place to prevent duplication
+                $configContent = [regex]::Replace($configContent, $pattern, $newHostBlock.Trim())
+                Set-Content -Path $sshConfigFile -Value $configContent
+            } else {
+                # Append if it doesn't already exist
+                Set-Content -Path $sshConfigFile -Value "$configContent`n$newHostBlock"
+            }
+        } else {
+            Set-Content -Path $sshConfigFile -Value $newHostBlock.Trim()
+        }
+        Write-Host "SSH config successfully updated for host: $hostName ($vmIp)" -ForegroundColor Green
+    } else {
+        Write-Warning "Could not retrieve VM IP address for SSH config update."
+    }
+
     Pop-Location
 
     Write-Host "Deployment, provisioning, and final configuration completed successfully!" -ForegroundColor Green
 
-    # 14. Automatically open a completely new Windows Terminal window in the target folder and run vagrant ssh
+    # 15. Automatically open a completely new Windows Terminal window in the target folder and run vagrant ssh
     $openTerminal = Read-Host "Would you like to open a new terminal window and connect to the VM via SSH? (y/n)"
     if ($openTerminal -match '^[Yy]') {
         if (Get-Command "wt.exe" -ErrorAction SilentlyContinue) {
-            # Opens a brand-new Windows Terminal window (-w -1) starting in the VM folder and running vagrant ssh
             Start-Process wt.exe -ArgumentList "-w -1 nt -d `"$finalFolderPath`" powershell -NoExit -Command `"vagrant ssh`""
         } else {
-            # Fallback to standard PowerShell window if Windows Terminal is missing
             Start-Process powershell.exe -ArgumentList "-NoExit -Command `"Set-Location '$finalFolderPath'; vagrant ssh`""
         }
     }
