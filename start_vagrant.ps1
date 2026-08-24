@@ -73,8 +73,8 @@ function Invoke-CheckedCommand {
         )
     }
 
-    return [PSCustomObject]@{
-        Output = $output
+    [PSCustomObject]@{
+        Output   = $output
         ExitCode = $exitCode
     }
 }
@@ -129,11 +129,7 @@ function Get-ExpectedHyperVSwitch {
             -InterfaceIndex $route.InterfaceIndex `
             -ErrorAction SilentlyContinue
 
-        if (-not $adapter) {
-            continue
-        }
-
-        if ($adapter.Status -ne 'Up') {
+        if (-not $adapter -or $adapter.Status -ne 'Up') {
             continue
         }
 
@@ -159,11 +155,23 @@ function Get-ExpectedHyperVSwitch {
     }
 
     Write-Warning (
-        "Could not determine the active network. Using '{0}'." -f
-        $WiredSwitch
+        "Could not determine the active network. Using '{0}'." -f $WiredSwitch
     )
 
     return $WiredSwitch
+}
+
+function Test-HyperVSwitchExists {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SwitchName
+    )
+
+    $switch = Get-VMSwitch `
+        -Name $SwitchName `
+        -ErrorAction SilentlyContinue
+
+    return $null -ne $switch
 }
 
 function Get-HyperVVmInfo {
@@ -178,8 +186,8 @@ function Get-HyperVVmInfo {
 
     if (-not $vm) {
         return [PSCustomObject]@{
-            Exists = $false
-            State = 'NotFound'
+            Exists   = $false
+            State    = 'NotFound'
             Switches = @()
         }
     }
@@ -197,11 +205,35 @@ function Get-HyperVVmInfo {
         Select-Object -Unique
     )
 
-    return [PSCustomObject]@{
-        Exists = $true
-        State = [string]$vm.State
+    [PSCustomObject]@{
+        Exists   = $true
+        State    = [string]$vm.State
         Switches = $switches
     }
+}
+
+function Wait-ForHyperVVm {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+
+        [int]$TimeoutSeconds = 120
+    )
+
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+
+    do {
+        $vmInfo = Get-HyperVVmInfo -VmName $VmName
+
+        if ($vmInfo.Exists -and $vmInfo.State -eq 'Running') {
+            return $vmInfo
+        }
+
+        Start-Sleep -Seconds 2
+    }
+    while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+
+    return (Get-HyperVVmInfo -VmName $VmName)
 }
 
 function Get-SshConfigValue {
@@ -217,11 +249,21 @@ function Get-SshConfigValue {
     $pattern = '(?im)^\s*{0}\s+(?<Value>.+?)\s*$' -f $escapedPropertyName
     $match = [regex]::Match($ConfigText, $pattern)
 
-    if ($match.Success) {
-        return $match.Groups['Value'].Value.Trim().Trim('"')
+    if (-not $match.Success) {
+        return $null
     }
 
-    return $null
+    $value = $match.Groups['Value'].Value.Trim()
+
+    if (
+        $value.Length -ge 2 -and
+        $value.StartsWith('"') -and
+        $value.EndsWith('"')
+    ) {
+        $value = $value.Substring(1, $value.Length - 2)
+    }
+
+    return $value
 }
 
 function Normalize-SshPath {
@@ -230,7 +272,8 @@ function Normalize-SshPath {
         [string]$Path
     )
 
-    $result = [Environment]::ExpandEnvironmentVariables($Path)
+    $result = $Path.Trim().Trim('"')
+    $result = [Environment]::ExpandEnvironmentVariables($result)
 
     if ($result.StartsWith('~')) {
         $result = Join-Path `
@@ -276,9 +319,7 @@ function Update-SshConfig {
 
     $escapedHostName = [regex]::Escape($HostName)
 
-    # This pattern uses \r?
- as text inside a single-quoted PowerShell
-    # string, so the regular expression receives the intended characters.
+    # Match one complete Host block, stopping at the next Host entry.
     $hostPattern = (
         '(?ims)^[ \t]*Host[ \t]+{0}[ \t]*\r?
 ' +
@@ -286,10 +327,10 @@ function Update-SshConfig {
     ) -f $escapedHostName
 
     $newBlock = @(
-        'Host {0}' -f $HostName
-        '    HostName {0}' -f $VmIp
-        '    User {0}' -f $UserName
-        '    IdentityFile "{0}"' -f $IdentityFile
+        "Host $HostName"
+        "    HostName $VmIp"
+        "    User $UserName"
+        "    IdentityFile `"$IdentityFile`""
         ''
     ) -join [Environment]::NewLine
 
@@ -297,7 +338,10 @@ function Update-SshConfig {
         $config = [regex]::Replace(
             $config,
             $hostPattern,
-            $newBlock
+            [System.Text.RegularExpressions.MatchEvaluator] {
+                param($match)
+                $newBlock
+            }
         )
     }
     else {
@@ -316,13 +360,15 @@ function Update-SshConfig {
         [System.Text.UTF8Encoding]::new($false)
     )
 
-    Write-Host (
-        'SSH configuration updated: {0}' -f $sshConfigPath
-    ) -ForegroundColor Green
+    Write-Host `
+        "SSH configuration updated: $sshConfigPath" `
+        -ForegroundColor Green
 }
 
 function Test-VagrantSsh {
-    Write-Host 'Testing Vagrant SSH connection...' -ForegroundColor Cyan
+    Write-Host `
+        'Testing Vagrant SSH connection...' `
+        -ForegroundColor Cyan
 
     $result = Invoke-CheckedCommand `
         -FilePath 'vagrant' `
@@ -345,11 +391,13 @@ function Test-VagrantSsh {
         )
     }
 
-    if ($result.Output -notmatch 'VAGRANT_SSH_OK') {
+    if (($result.Output | Out-String) -notmatch 'VAGRANT_SSH_OK') {
         throw 'The expected Vagrant SSH response was not received.'
     }
 
-    Write-Host 'Vagrant SSH test succeeded.' -ForegroundColor Green
+    Write-Host `
+        'Vagrant SSH test succeeded.' `
+        -ForegroundColor Green
 }
 
 function Start-DirectoryTabAndSshTab {
@@ -361,42 +409,43 @@ function Start-DirectoryTabAndSshTab {
         [string]$SshTitle
     )
 
-    $wt = Get-Command 'wt.exe' -ErrorAction SilentlyContinue
+    $wt = Get-Command `
+        'wt.exe' `
+        -ErrorAction SilentlyContinue
 
     if (-not $wt) {
         Write-Warning 'Windows Terminal was not found.'
-        Write-Host 'Starting Vagrant SSH in the current window.'
+        Write-Host 'Starting Vagrant SSH in the current PowerShell window.'
 
         $Host.UI.RawUI.WindowTitle = $SshTitle
         & vagrant ssh
         return
     }
 
-    $safeDirectory = $WorkingDirectory.Replace("'", "''")
-    $safeDirectoryTitle = $DirectoryTabTitle.Replace("'", "''")
-    $safeSshTitle = $SshTitle.Replace("'", "''")
+    $directoryForCommand = $WorkingDirectory.Replace("'", "''")
+    $directoryTitleForCommand = $DirectoryTabTitle.Replace("'", "''")
+    $sshTitleForCommand = $SshTitle.Replace("'", "''")
 
-    # The directory tab only changes to the Vagrant directory.
-    # It does not start another Windows Terminal process.
-    $directoryCommand = (
-        "Set-Location -LiteralPath '{0}'; " +
-        "`$Host.UI.RawUI.WindowTitle = '{1}'"
-    ) -f $safeDirectory, $safeDirectoryTitle
+    $directoryCommand = @"
+Set-Location -LiteralPath '$directoryForCommand'
+`$Host.UI.RawUI.WindowTitle = '$directoryTitleForCommand'
+"@
 
-    # The SSH tab sets the title before vagrant starts and leaves the title
-    # unchanged while the SSH session is active.
-    $sshCommand = (
-        "Set-Location -LiteralPath '{0}'; " +
-        "`$Host.UI.RawUI.WindowTitle = '{1}'; " +
-        "vagrant ssh"
-    ) -f $safeDirectory, $safeSshTitle
+    $sshCommand = @"
+Set-Location -LiteralPath '$directoryForCommand'
+`$Host.UI.RawUI.WindowTitle = '$sshTitleForCommand'
+& vagrant ssh
+if (`$LASTEXITCODE -ne 0) {
+    Write-Host ''
+    Write-Host "Vagrant SSH exited with code `$LASTEXITCODE." -ForegroundColor Red
+}
+"@
 
     if ($env:WT_SESSION) {
-        # The script is already running in a Windows Terminal tab.
-        # That current tab becomes the directory tab.
+        # The current Windows Terminal tab becomes the directory tab.
         $Host.UI.RawUI.WindowTitle = $DirectoryTabTitle
 
-        # Open exactly one additional tab for SSH.
+        # Open exactly one additional SSH tab.
         & $wt.Source `
             new-tab `
             --title $SshTitle `
@@ -409,10 +458,7 @@ function Start-DirectoryTabAndSshTab {
         return
     }
 
-    # The script is not running in Windows Terminal.
-    # Start Windows Terminal with exactly two commands:
-    #   command 1: directory tab
-    #   command 2: SSH tab
+    # When launched outside Windows Terminal, open two tabs in one Terminal window.
     & $wt.Source `
         new-tab `
         --title $DirectoryTabTitle `
@@ -464,7 +510,7 @@ if (-not $isAdministrator) {
             '-ExecutionPolicy'
             'Bypass'
             '-File'
-            $scriptPath
+            "`"$scriptPath`""
         )
 
     exit
@@ -474,220 +520,231 @@ if (-not $isAdministrator) {
 # Main
 # ---------------------------------------------------------------------------
 
-Set-Location -LiteralPath $PSScriptRoot
+try {
+    Set-Location -LiteralPath $PSScriptRoot
 
-if (-not (Get-Command 'vagrant.exe' -ErrorAction SilentlyContinue)) {
-    Stop-Script 'Vagrant was not found in PATH.'
-}
+    if (-not (Get-Command 'vagrant.exe' -ErrorAction SilentlyContinue)) {
+        Stop-Script 'Vagrant was not found in PATH.'
+    }
 
-if (-not (Get-Command 'Get-VM' -ErrorAction SilentlyContinue)) {
-    Stop-Script 'The Hyper-V PowerShell module is not available.'
-}
+    if (-not (Get-Command 'Get-VM' -ErrorAction SilentlyContinue)) {
+        Stop-Script 'The Hyper-V PowerShell module is not available.'
+    }
 
-$vagrantfilePath = Join-Path $PSScriptRoot 'Vagrantfile'
+    $vagrantfilePath = Join-Path $PSScriptRoot 'Vagrantfile'
 
-if (-not (Test-Path -LiteralPath $vagrantfilePath)) {
-    Stop-Script (
-        'Vagrantfile was not found at: {0}' -f $vagrantfilePath
-    )
-}
+    if (-not (Test-Path -LiteralPath $vagrantfilePath)) {
+        Stop-Script (
+            'Vagrantfile was not found at: {0}' -f $vagrantfilePath
+        )
+    }
 
-Write-Step 'Identifying the Hyper-V VM'
+    Write-Step 'Identifying the Hyper-V VM'
 
-$vmName = Get-VagrantVmName `
-    -VagrantfilePath $vagrantfilePath
+    $vmName = Get-VagrantVmName `
+        -VagrantfilePath $vagrantfilePath
 
-$sshTabTitle = '{0}@{1}' -f $SshUser, $vmName
+    $sshTabTitle = '{0}@{1}' -f $SshUser, $vmName
 
-Write-Host (
-    'Hyper-V VM: {0}' -f $vmName
-) -ForegroundColor Green
-
-Write-Host (
-    'SSH tab title: {0}' -f $sshTabTitle
-) -ForegroundColor Green
-
-Write-Step 'Determining the expected Hyper-V switch'
-
-$expectedSwitch = Get-ExpectedHyperVSwitch `
-    -WiredSwitch $WiredSwitchName `
-    -WirelessSwitch $WirelessSwitchName
-
-Write-Host (
-    'Expected switch: {0}' -f $expectedSwitch
-) -ForegroundColor Green
-
-Write-Step 'Checking Hyper-V VM state'
-
-# This is the only VM status check. vagrant status is not used.
-$vmInfo = Get-HyperVVmInfo -VmName $vmName
-
-if (-not $vmInfo.Exists) {
     Write-Host `
-        "VM not found in Hyper-V. Running 'vagrant up'..." `
-        -ForegroundColor Yellow
-
-    Invoke-CheckedCommand `
-        -FilePath 'vagrant' `
-        -ArgumentList @('up') |
-        ForEach-Object {
-            $_.Output | Write-Host
-        }
-
-    $vmInfo = Get-HyperVVmInfo -VmName $vmName
-}
-elseif ($vmInfo.State -ne 'Running') {
-    Write-Host (
-        "VM state is '{0}'. Running 'vagrant up'..." -f
-        $vmInfo.State
-    ) -ForegroundColor Yellow
-
-    Invoke-CheckedCommand `
-        -FilePath 'vagrant' `
-        -ArgumentList @('up') |
-        ForEach-Object {
-            $_.Output | Write-Host
-        }
-
-    $vmInfo = Get-HyperVVmInfo -VmName $vmName
-}
-else {
-    Write-Host `
-        'The Hyper-V VM is already running.' `
+        "Hyper-V VM: $vmName" `
         -ForegroundColor Green
-}
 
-if (-not $vmInfo.Exists) {
-    Stop-Script `
-        'The VM was not found after running vagrant up.'
-}
+    Write-Host `
+        "SSH tab title: $sshTabTitle" `
+        -ForegroundColor Green
 
-if ($vmInfo.State -ne 'Running') {
-    Stop-Script (
-        "The VM is not running. Current state: '{0}'" -f
-        $vmInfo.State
-    )
-}
+    Write-Step 'Determining the expected Hyper-V switch'
 
-Write-Step 'Checking the Hyper-V network switch'
+    $expectedSwitch = Get-ExpectedHyperVSwitch `
+        -WiredSwitch $WiredSwitchName `
+        -WirelessSwitch $WirelessSwitchName
 
-$currentSwitch = $vmInfo.Switches | Select-Object -First 1
+    Write-Host `
+        "Expected switch: $expectedSwitch" `
+        -ForegroundColor Green
 
-if ([string]::IsNullOrWhiteSpace($currentSwitch)) {
-    Write-Warning `
-        'No Hyper-V network switch was found on the VM.'
-}
-elseif ($currentSwitch -ne $expectedSwitch) {
-    Write-Warning (
-        "Switch mismatch. Expected '{0}', current '{1}'." -f
-        $expectedSwitch,
-        $currentSwitch
-    )
+    if (-not (Test-HyperVSwitchExists -SwitchName $expectedSwitch)) {
+        Stop-Script (
+            "The expected Hyper-V switch '{0}' does not exist." -f
+            $expectedSwitch
+        )
+    }
 
-    $reloadChoice = Read-Host `
-        'Reload the VM to re-evaluate the switch? (y/n)'
+    Write-Step 'Checking Hyper-V VM state'
 
-    if ($reloadChoice -match '^[Yy]') {
-        Write-Host `
-            'Reloading the VM without provisioning...' `
-            -ForegroundColor Yellow
+    $vmInfo = Get-HyperVVmInfo -VmName $vmName
+
+    if (-not $vmInfo.Exists -or $vmInfo.State -ne 'Running') {
+        if (-not $vmInfo.Exists) {
+            Write-Host `
+                "VM not found in Hyper-V. Running 'vagrant up'..." `
+                -ForegroundColor Yellow
+        }
+        else {
+            Write-Host `
+                ("VM state is '{0}'. Running 'vagrant up'..." -f $vmInfo.State) `
+                -ForegroundColor Yellow
+        }
 
         Invoke-CheckedCommand `
             -FilePath 'vagrant' `
-            -ArgumentList @(
-                'reload'
-                '--no-provision'
-            ) |
+            -ArgumentList @('up') |
+        ForEach-Object {
+            $_.Output | Write-Host
+        }
+
+        $vmInfo = Wait-ForHyperVVm -VmName $vmName
+    }
+    else {
+        Write-Host `
+            'The Hyper-V VM is already running.' `
+            -ForegroundColor Green
+    }
+
+    if (-not $vmInfo.Exists) {
+        Stop-Script `
+            'The VM was not found after running vagrant up.'
+    }
+
+    if ($vmInfo.State -ne 'Running') {
+        Stop-Script (
+            "The VM is not running. Current state: '{0}'" -f $vmInfo.State
+        )
+    }
+
+    Write-Step 'Checking the Hyper-V network switch'
+
+    $currentSwitch = $vmInfo.Switches | Select-Object -First 1
+
+    if ([string]::IsNullOrWhiteSpace($currentSwitch)) {
+        Write-Warning `
+            'No Hyper-V network switch was found on the VM.'
+    }
+    elseif ($currentSwitch -ne $expectedSwitch) {
+        Write-Warning (
+            "Switch mismatch. Expected '{0}', current '{1}'." -f
+            $expectedSwitch,
+            $currentSwitch
+        )
+
+        $reloadChoice = Read-Host `
+            'Reload the VM to re-evaluate the switch? (y/n)'
+
+        if ($reloadChoice -match '^[Yy]') {
+            Write-Host `
+                'Reloading the VM without provisioning...' `
+                -ForegroundColor Yellow
+
+            Invoke-CheckedCommand `
+                -FilePath 'vagrant' `
+                -ArgumentList @(
+                    'reload'
+                    '--no-provision'
+                ) |
             ForEach-Object {
                 $_.Output | Write-Host
             }
 
-        $vmInfo = Get-HyperVVmInfo -VmName $vmName
+            $vmInfo = Wait-ForHyperVVm -VmName $vmName
 
-        if ($vmInfo.State -ne 'Running') {
-            Stop-Script (
-                "The VM is not running after reload. Current state: '{0}'" -f
-                $vmInfo.State
-            )
-        }
+            if (
+                -not $vmInfo.Exists -or
+                $vmInfo.State -ne 'Running'
+            ) {
+                Stop-Script (
+                    "The VM is not running after reload. Current state: '{0}'" -f
+                    $vmInfo.State
+                )
+            }
 
-        $currentSwitch = $vmInfo.Switches | Select-Object -First 1
+            $currentSwitch = $vmInfo.Switches | Select-Object -First 1
 
-        if ($currentSwitch -eq $expectedSwitch) {
-            Write-Host `
-                'The switch now matches the expected switch.' `
-                -ForegroundColor Green
+            if ($currentSwitch -eq $expectedSwitch) {
+                Write-Host `
+                    'The switch now matches the expected switch.' `
+                    -ForegroundColor Green
+            }
+            else {
+                Write-Warning (
+                    "The VM is still connected to '{0}' after reload." -f
+                    $currentSwitch
+                )
+            }
         }
         else {
-            Write-Warning (
-                "The VM is still connected to '{0}' after reload." -f
-                $currentSwitch
-            )
+            Write-Host `
+                'Reload skipped. Keeping the current switch.' `
+                -ForegroundColor Yellow
         }
     }
     else {
         Write-Host `
-            'Reload skipped. Keeping the current switch.' `
-            -ForegroundColor Yellow
+            'The Hyper-V switch matches the expected switch.' `
+            -ForegroundColor Green
     }
-}
-else {
+
+    Write-Step 'Reading SSH configuration'
+
+    $sshConfigResult = Invoke-CheckedCommand `
+        -FilePath 'vagrant' `
+        -ArgumentList @('ssh-config')
+
+    $sshConfig = $sshConfigResult.Output -join [Environment]::NewLine
+
+    $vmIp = Get-SshConfigValue `
+        -ConfigText $sshConfig `
+        -PropertyName 'HostName'
+
+    $identityFile = Get-SshConfigValue `
+        -ConfigText $sshConfig `
+        -PropertyName 'IdentityFile'
+
+    if ([string]::IsNullOrWhiteSpace($vmIp)) {
+        Stop-Script `
+            "HostName was not found in 'vagrant ssh-config'."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($identityFile)) {
+        $identityFile = Join-Path `
+            $env:USERPROFILE `
+            '.vagrant.d\insecure_private_keys\vagrant.key.rsa'
+    }
+
+    $identityFile = Normalize-SshPath -Path $identityFile
+
+    if (-not (Test-Path -LiteralPath $identityFile)) {
+        Write-Warning `
+            "The SSH identity file was not found: $identityFile"
+    }
+
     Write-Host `
-        'The Hyper-V switch matches the expected switch.' `
+        "VM SSH address: $vmIp" `
         -ForegroundColor Green
+
+    Write-Host `
+        "SSH key: $identityFile" `
+        -ForegroundColor Green
+
+    Write-Step 'Updating SSH configuration'
+
+    Update-SshConfig `
+        -HostName $vmName `
+        -VmIp $vmIp `
+        -IdentityFile $identityFile `
+        -UserName $SshUser
+
+    Write-Step 'Testing SSH'
+
+    Test-VagrantSsh
+
+    Write-Step 'Opening exactly two terminal tabs'
+
+    Start-DirectoryTabAndSshTab `
+        -WorkingDirectory $PSScriptRoot `
+        -SshTitle $sshTabTitle
 }
-
-Write-Step 'Reading SSH configuration'
-
-$sshConfigResult = Invoke-CheckedCommand `
-    -FilePath 'vagrant' `
-    -ArgumentList @('ssh-config')
-
-$sshConfig = $sshConfigResult.Output -join [Environment]::NewLine
-
-$vmIp = Get-SshConfigValue `
-    -ConfigText $sshConfig `
-    -PropertyName 'HostName'
-
-$identityFile = Get-SshConfigValue `
-    -ConfigText $sshConfig `
-    -PropertyName 'IdentityFile'
-
-if ([string]::IsNullOrWhiteSpace($vmIp)) {
-    Stop-Script `
-        "HostName was not found in 'vagrant ssh-config'."
+catch {
+    Write-Error $_.Exception.Message
+    exit 1
 }
-
-if ([string]::IsNullOrWhiteSpace($identityFile)) {
-    $identityFile = Join-Path `
-        $env:USERPROFILE `
-        '.vagrant.d\insecure_private_keys\vagrant.key.rsa'
-}
-
-$identityFile = Normalize-SshPath -Path $identityFile
-
-Write-Host (
-    'VM SSH address: {0}' -f $vmIp
-) -ForegroundColor Green
-
-Write-Host (
-    'SSH key: {0}' -f $identityFile
-) -ForegroundColor Green
-
-Write-Step 'Updating SSH configuration'
-
-Update-SshConfig `
-    -HostName $vmName `
-    -VmIp $vmIp `
-    -IdentityFile $identityFile `
-    -UserName $SshUser
-
-Write-Step 'Testing SSH'
-
-Test-VagrantSsh
-
-Write-Step 'Opening exactly two terminal tabs'
-
-Start-DirectoryTabAndSshTab `
-    -WorkingDirectory $PSScriptRoot `
-    -SshTitle $sshTabTitle
